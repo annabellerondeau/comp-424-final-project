@@ -11,6 +11,9 @@ from helpers import (get_valid_moves, execute_move, check_winner, copy_state,
 from constants import *
 import time
 
+#---------------------------------------------------------------------------
+# HELPERS
+#---------------------------------------------------------------------------
 
 def after(board, reserves, player, move):
     """Return copied state after ``player`` makes a legal ``move``."""
@@ -28,25 +31,68 @@ def opponent_has_immediate_win(board, reserves, opponent):
     return False
 
 
-def evaluate(board, reserves, player, opponent):
-    """Estimate a non-terminal position from ``player``'s perspective.
+def largest_available_size(owners, sizes, reserves, who):
+    for size in (LARGE, MEDIUM, SMALL):
+        if reserves[who, size] > 0:
+            return size # return largest size in the reserve
+        if ALLOW_MOVES: # return largest size currently on the board that could be moved
+            for r in range(BOARD_SIZE):
+                for c in range(BOARD_SIZE):
+                    if owners[r, c] == who and sizes[r, c] == size:
+                        return size
+    return -1
 
-    Only visible top pieces count in a winning line.  A line containing both
-    players is blocked, whereas a line containing pieces from just one player
-    remains useful.  The values intentionally make three-in-a-row threats much
-    more important than diffuse board control.
-    """
+def can_be_covered(piece_size, opponent_max_size): # returns trye if the oponent can cover the piece
+    return opponent_max_size > piece_size
+
+#---------------------------------------------------------------------------
+# HEURISTIC
+#---------------------------------------------------------------------------
+
+def evaluate(board, reserves, player, opponent):
+    # Factors that count in the heuristic
+    # 1. Score increases by the number of squares I own in lines where there are no obstacles and no pieces from the other player (at the top)
+    # 2. Score decreases by the numner of squares the opponent owns in lines where I have no square and there are no obstacles
+    # 3. Score fluctuations in 1 and 2 depend on whether or not the pieces can be covered by the other player (0,5 if yes, 1 if no)
+    # 4. Score is increased if next turn player can fill the 4th square
+
     owners, sizes = top_view(board)
     score = 0
     line_value = (0, 2, 12, 80, 0)
 
+    opp_max = largest_available_size(owners, sizes, reserves, opponent)
+    my_max  = largest_available_size(owners, sizes, reserves, player)
+
     for line in LINES[WIN_LENGTH]:
-        mine = sum(owners[r, c] == player for r, c in line)
-        theirs = sum(owners[r, c] == opponent for r, c in line)
-        if theirs == 0:
-            score += line_value[mine]
-        elif mine == 0:
-            score -= line_value[theirs]
+        # a player can never win with a line that has an obstacle
+        if any(owners[r, c] == OBSTACLE for r, c in line):
+            continue
+
+        # Increment score by number of
+
+        my_count = 0     # how many squares each side owns (integer)
+        their_count = 0    
+        my_sum = 0.0        # same, but coverable pieces count 0.5
+        their_sum = 0.0
+
+        for r, c in line:
+            if owners[r, c] == player:
+                my_count += 1
+                if can_be_covered(sizes[r, c], opp_max):
+                    my_sum += 0.5
+                else:
+                    my_sum += 1.0
+            elif owners[r, c] == opponent:
+                their_count += 1
+                if can_be_covered(sizes[r, c], my_max):
+                    their_sum += 0.5
+                else:
+                    their_sum += 1.0
+
+        if their_count == 0 and my_count > 0: # opponent has no piece in this line
+            score += line_value[my_count] * (my_sum / my_count)
+        elif my_count == 0 and their_count > 0:
+            score -= line_value[their_count] * (their_sum / their_count)
 
     # Larger visible pieces can cover more opposing pieces.  Prefer keeping
     # large pieces in reserve slightly, so they remain available as replies.
@@ -60,6 +106,10 @@ def evaluate(board, reserves, player, opponent):
     score += int(reserves[player, LARGE]) * 2
     score -= int(reserves[opponent, LARGE]) * 2
     return score
+
+#---------------------------------------------------------------------------
+# ALPHA-BETA
+#---------------------------------------------------------------------------
 
 
 TIME_LIMIT = 1.5
@@ -139,7 +189,9 @@ def iterative_deepening(board, reserves, player, opponent):
         pass
     return best_move
 
-
+#---------------------------------------------------------------------------
+# AGENT INITIALIZATION
+#---------------------------------------------------------------------------
 
 @register_agent("student_agent")          # do not change this string
 class StudentAgent(Agent):
