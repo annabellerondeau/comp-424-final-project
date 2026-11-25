@@ -9,6 +9,7 @@ from store import register_agent
 from helpers import (get_valid_moves, execute_move, check_winner, copy_state,
                      top_view, LINES)
 from constants import *
+import time
 
 
 def after(board, reserves, player, move):
@@ -60,6 +61,86 @@ def evaluate(board, reserves, player, opponent):
     score -= int(reserves[opponent, LARGE]) * 2
     return score
 
+
+TIME_LIMIT = 1.5
+WIN_SCORE = 100000
+
+class TimeUp(Exception):
+    pass
+
+def max_value(board, reserves, player, opponent, alpha, beta, depth, deadline):
+    if time.perf_counter() > deadline:
+        raise TimeUp()
+
+    winner = check_winner(board, opponent)
+    if winner == opponent:
+        return -WIN_SCORE
+    if winner == player:
+        return WIN_SCORE
+    if depth == 0:
+        return evaluate(board, reserves, player, opponent)
+
+    for move in get_valid_moves(board, reserves, player):
+        next_board, next_reserves = after(board, reserves, player, move)
+        alpha = max(alpha, min_value(next_board, next_reserves, player, opponent, alpha, beta, depth - 1, deadline))
+        if alpha >= beta:
+            return beta
+    return alpha
+
+def min_value(board, reserves, player, opponent, alpha, beta, depth, deadline):
+    if time.perf_counter() > deadline:
+            raise TimeUp()
+    
+    winner = check_winner(board, player)
+    if winner == player:
+        return WIN_SCORE
+    if winner == opponent:
+        return -WIN_SCORE
+    if depth == 0:
+        return evaluate(board, reserves, player, opponent)
+
+    for move in get_valid_moves(board, reserves, opponent):
+        next_board, next_reserves = after(board, reserves, opponent, move)
+        beta = min(beta, max_value(next_board, next_reserves, player, opponent, alpha, beta, depth - 1, deadline))
+        if alpha >= beta:
+            return alpha
+    return beta
+
+def alpha_beta_decision(board, reserves, player, opponent, depth, deadline, first_move):
+    moves = get_valid_moves(board, reserves, player)
+
+    if first_move is not None:
+        moves.remove(first_move)
+        moves.insert(0, first_move)
+
+    best_move = moves[0]
+    alpha = float("-inf")
+    beta = float("inf")
+    for move in moves:
+        next_board, next_reserves = after(board, reserves, player, move)
+        value = min_value(next_board, next_reserves, player, opponent,
+                            alpha, beta, depth - 1, deadline)
+        if value > alpha:
+            alpha = value
+            best_move = move
+    return best_move, alpha
+
+def iterative_deepening(board, reserves, player, opponent):
+    deadline = time.perf_counter() + TIME_LIMIT
+    best_move = None
+    depth = 1
+    try:
+        while True:
+            best_move, value = alpha_beta_decision(board, reserves, player, opponent, depth, deadline, best_move)
+            if value >= WIN_SCORE or value <= -WIN_SCORE:
+                break
+            depth += 1
+    except TimeUp:
+        pass
+    return best_move
+
+
+
 @register_agent("student_agent")          # do not change this string
 class StudentAgent(Agent):
     def __init__(self):
@@ -75,6 +156,10 @@ class StudentAgent(Agent):
                player, opponent - your player number (1 or 2) and the other one.
         Agent.step in agents/agent.py explains each argument and the time limit.
         """
+        search_move = iterative_deepening(board, reserves, player, opponent)
+        if search_move is not None:
+            return search_move
+        
         moves = get_valid_moves(board, reserves, player)
         survivors = []
         safe = []
