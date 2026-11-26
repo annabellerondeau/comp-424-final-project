@@ -11,6 +11,11 @@ from helpers import (get_valid_moves, execute_move, check_winner, copy_state,
 from constants import *
 import time
 
+THREAT_BONUS = 50
+DOUBLE_THREAT_BONUS = 400
+TIME_LIMIT = 0.2 # TO SET BACK TO 1.5, this is to make testing faster
+WIN_SCORE = 100000
+
 #---------------------------------------------------------------------------
 # HELPERS
 #---------------------------------------------------------------------------
@@ -45,6 +50,22 @@ def largest_available_size(owners, sizes, reserves, who):
 def can_be_covered(piece_size, opponent_max_size): # returns trye if the oponent can cover the piece
     return opponent_max_size > piece_size
 
+
+def can_fill(owners, sizes, r, c, who, who_max): # can who place a piece on (r,c)
+    if owners[r, c] == EMPTY:
+        return who_max >= 0                      # any piece will do
+    if owners[r, c] == 3 - who:                  # the other player's piece
+        return who_max > sizes[r, c]             # need a strictly larger one
+    return False                                 # own piece or obstacle
+
+
+def threat_score(n):
+        if n >= 2: # basically a win becayse opponent can mostly block one threat per move
+            return DOUBLE_THREAT_BONUS
+        if n == 1: # could be blocked next round
+            return THREAT_BONUS
+        return 0
+
 #---------------------------------------------------------------------------
 # HEURISTIC
 #---------------------------------------------------------------------------
@@ -62,6 +83,10 @@ def evaluate(board, reserves, player, opponent):
 
     opp_max = largest_available_size(owners, sizes, reserves, opponent)
     my_max  = largest_available_size(owners, sizes, reserves, player)
+
+    # Squares missing to form a line:
+    my_gaps = set()     
+    their_gaps = set()
 
     for line in LINES[WIN_LENGTH]:
         # a player can never win with a line that has an obstacle
@@ -94,6 +119,22 @@ def evaluate(board, reserves, player, opponent):
         elif my_count == 0 and their_count > 0:
             score -= line_value[their_count] * (their_sum / their_count)
 
+
+        if my_count == WIN_LENGTH - 1:
+            gap = next((r, c) for r, c in line if owners[r, c] != player)
+            if can_fill(owners, sizes, gap[0], gap[1], player, my_max):
+                my_gaps.add(gap)
+
+        if their_count == WIN_LENGTH - 1:
+            gap = next((r, c) for r, c in line if owners[r, c] != opponent)
+            if can_fill(owners, sizes, gap[0], gap[1], opponent, opp_max):
+                their_gaps.add(gap)
+
+    # Update if the next move is a threat for the opponent
+
+    score += threat_score(len(my_gaps))
+    score -= threat_score(len(their_gaps))
+
     # Larger visible pieces can cover more opposing pieces.  Prefer keeping
     # large pieces in reserve slightly, so they remain available as replies.
     for r in range(BOARD_SIZE):
@@ -110,10 +151,6 @@ def evaluate(board, reserves, player, opponent):
 #---------------------------------------------------------------------------
 # ALPHA-BETA
 #---------------------------------------------------------------------------
-
-
-TIME_LIMIT = 1.5
-WIN_SCORE = 100000
 
 class TimeUp(Exception):
     pass
