@@ -1,9 +1,3 @@
-"""A tactical baseline agent for Goblet Gobblers.
-
-The agent first looks for one-move wins, then avoids moves that immediately
-lose (including losses caused by uncovering an opponent's line), and finally
-uses a small positional heuristic to choose among safe moves.
-"""
 from agents.agent import Agent
 from store import register_agent
 from helpers import (get_valid_moves, execute_move, check_winner, copy_state,
@@ -13,6 +7,7 @@ import time
 
 THREAT_BONUS = 50
 DOUBLE_THREAT_BONUS = 400
+WINNING_THREAT = 5000 # I have a single gap in a line and it is my turn
 TIME_LIMIT = 0.2 # TO SET BACK TO 1.5, this is to make testing faster
 WIN_SCORE = 100000
 
@@ -20,15 +15,13 @@ WIN_SCORE = 100000
 # HELPERS
 #---------------------------------------------------------------------------
 
-def after(board, reserves, player, move):
-    """Return copied state after ``player`` makes a legal ``move``."""
+def after(board, reserves, player, move): # returns state after player makes a legal move
     next_board, next_reserves = copy_state(board, reserves)
     execute_move(next_board, next_reserves, player, move)
     return next_board, next_reserves
 
 
-def opponent_has_immediate_win(board, reserves, opponent):
-    """Return whether the opponent can win on their next move."""
+def opponent_has_immediate_win(board, reserves, opponent): # return if the opponent can win on their next move
     for move in get_valid_moves(board, reserves, opponent):
         next_board, _ = after(board, reserves, opponent, move)
         if check_winner(next_board, opponent) == opponent:
@@ -66,16 +59,30 @@ def threat_score(n):
             return THREAT_BONUS
         return 0
 
+# def get_stack(board, r,c): # returns the pieces on (r,c from bottom to top) as [(Player, size), (Player, size)....]
+#     if board[r, c, SMALL] == OBSTACLE:
+#         return []
+#     for s in (SMALL, MEDIUM, LARGE):
+#         if board[r, c, s] != EMPTY:
+#             return [(int(board[r, c, s]), s)]
+
+def piece_below_top(board, r, c, top_size): # what piece is revealed if the top piece at (r,c) moves
+    for s in range(top_size - 1, -1, -1):      # next size down, then the one below
+        if board[r, c, s] != EMPTY:
+            return int(board[r, c, s])
+    return EMPTY       
+
 #---------------------------------------------------------------------------
 # HEURISTIC
 #---------------------------------------------------------------------------
 
-def evaluate(board, reserves, player, opponent):
+def evaluate(board, reserves, player, opponent, turn = None):
     # Factors that count in the heuristic
     # 1. Score increases by the number of squares I own in lines where there are no obstacles and no pieces from the other player (at the top)
     # 2. Score decreases by the numner of squares the opponent owns in lines where I have no square and there are no obstacles
     # 3. Score fluctuations in 1 and 2 depend on whether or not the pieces can be covered by the other player (0,5 if yes, 1 if no)
     # 4. Score is increased if next turn player can fill the 4th square
+    # 5. TO-DO Pin pieces in place that would allow the opponent to win if moved (a piece that hides an opponent piece that would form a line otherwise)
 
     owners, sizes = top_view(board)
     score = 0
@@ -88,6 +95,9 @@ def evaluate(board, reserves, player, opponent):
     my_gaps = set()     
     their_gaps = set()
 
+    # Pinned pieces not to move
+    # pinned = set()
+
     for line in LINES[WIN_LENGTH]:
         # a player can never win with a line that has an obstacle
         if any(owners[r, c] == OBSTACLE for r, c in line):
@@ -99,10 +109,12 @@ def evaluate(board, reserves, player, opponent):
         their_count = 0    
         my_sum = 0.0        # same, but coverable pieces count 0.5
         their_sum = 0.0
+        my_squares = []
 
         for r, c in line:
             if owners[r, c] == player:
                 my_count += 1
+                my_squares.append((r, c))
                 if can_be_covered(sizes[r, c], opp_max):
                     my_sum += 0.5
                 else:
@@ -118,7 +130,10 @@ def evaluate(board, reserves, player, opponent):
             score += line_value[my_count] * (my_sum / my_count)
         elif my_count == 0 and their_count > 0:
             score -= line_value[their_count] * (their_sum / their_count)
-
+        # elif their_count == 3 and my_count == 1:
+        #     r, c = my_squares[1]
+        #     if (piece_below_top(board, r, c, sizes[r,c]) != EMPTY):
+        #         pinned.add(r,c)
 
         if my_count == WIN_LENGTH - 1:
             gap = next((r, c) for r, c in line if owners[r, c] != player)
@@ -132,8 +147,13 @@ def evaluate(board, reserves, player, opponent):
 
     # Update if the next move is a threat for the opponent
 
-    score += threat_score(len(my_gaps))
-    score -= threat_score(len(their_gaps))
+    if turn == player and my_gaps:
+        score += WINNING_THREAT
+    elif turn == opponent and their_gaps:
+        score -= WINNING_THREAT
+    else:
+        score += threat_score(len(my_gaps))
+        score -= threat_score(len(their_gaps))
 
     # Larger visible pieces can cover more opposing pieces.  Prefer keeping
     # large pieces in reserve slightly, so they remain available as replies.
@@ -144,6 +164,8 @@ def evaluate(board, reserves, player, opponent):
                 score += int(sizes[r, c]) + 1
             elif owner == opponent:
                 score -= int(sizes[r, c]) + 1
+            # elif pinned.contains(board[r,c, sizes[r,c]]):
+            #     score -= 1000 # decrease score by a lot for a move that reveals a piece in a winning line
     score += int(reserves[player, LARGE]) * 2
     score -= int(reserves[opponent, LARGE]) * 2
     return score
@@ -165,7 +187,7 @@ def max_value(board, reserves, player, opponent, alpha, beta, depth, deadline):
     if winner == player:
         return WIN_SCORE
     if depth == 0:
-        return evaluate(board, reserves, player, opponent)
+        return evaluate(board, reserves, player, opponent, turn = player)
 
     for move in get_valid_moves(board, reserves, player):
         next_board, next_reserves = after(board, reserves, player, move)
@@ -184,7 +206,7 @@ def min_value(board, reserves, player, opponent, alpha, beta, depth, deadline):
     if winner == opponent:
         return -WIN_SCORE
     if depth == 0:
-        return evaluate(board, reserves, player, opponent)
+        return evaluate(board, reserves, player, opponent, turn = opponent)
 
     for move in get_valid_moves(board, reserves, opponent):
         next_board, next_reserves = after(board, reserves, opponent, move)
