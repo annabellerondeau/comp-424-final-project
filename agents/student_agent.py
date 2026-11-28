@@ -1,15 +1,15 @@
 from agents.agent import Agent
 from store import register_agent
-from helpers import (get_valid_moves, execute_move, check_winner, copy_state,
-                     top_view, LINES)
+from helpers import (get_valid_moves, execute_move, check_winner, copy_state, top_view, has_line, LINES)
 from constants import *
 import time
 
 THREAT_BONUS = 50
-DOUBLE_THREAT_BONUS = 400
+DOUBLE_THREAT_BONUS = 800
 WINNING_THREAT = 5000 # I have a single gap in a line and it is my turn
-TIME_LIMIT = 0.2 # TO SET BACK TO 1.5, this is to make testing faster
+TIME_LIMIT = 1.5
 WIN_SCORE = 100000
+SCORE_BLOCK_WEIGHT = 0.3
 
 #---------------------------------------------------------------------------
 # HELPERS
@@ -72,22 +72,33 @@ def piece_below_top(board, r, c, top_size): # what piece is revealed if the top 
             return int(board[r, c, s])
     return EMPTY       
 
+def winner_from_owners(owners, last_mover): # returns if someone won, equivalent to check_winner but reuses existing top_view
+    other = 3 - last_mover
+    if has_line(owners, other):
+        return other
+    if has_line(owners, last_mover):
+        return last_mover
+    return 0
+
 #---------------------------------------------------------------------------
 # HEURISTIC
 #---------------------------------------------------------------------------
 
-def evaluate(board, reserves, player, opponent, turn = None):
+def evaluate(board, reserves, player, opponent, turn = None, owners = None, sizes = None):
     # Factors that count in the heuristic
     # 1. Score increases by the number of squares I own in lines where there are no obstacles and no pieces from the other player (at the top)
     # 2. Score decreases by the numner of squares the opponent owns in lines where I have no square and there are no obstacles
     # 3. Score fluctuations in 1 and 2 depend on whether or not the pieces can be covered by the other player (0,5 if yes, 1 if no)
     # 4. Score is increased if next turn player can fill the 4th square
     # 5. TO-DO Pin pieces in place that would allow the opponent to win if moved (a piece that hides an opponent piece that would form a line otherwise)
+    # 6. Points for pieces visible on the board, remove points for opponent pieces 
+    # 7. Use lines where my opponent has a piece, but I could cover it with a larger piece
 
-    owners, sizes = top_view(board)
+    if owners is None: # Only recompute if the objects are not passed as argument (expensive computation)
+        owners, sizes = top_view(board)
+
     score = 0
-    line_value = (0, 2, 12, 80, 0)
-
+    line_value = (0, 2, 12, 80, 0) #points awarded for having (0, 1, 2, 3) squares in this line
     opp_max = largest_available_size(owners, sizes, reserves, opponent)
     my_max  = largest_available_size(owners, sizes, reserves, player)
 
@@ -111,6 +122,9 @@ def evaluate(board, reserves, player, opponent, turn = None):
         their_sum = 0.0
         my_squares = []
 
+        my_blockers_coverable = True     # can I cover every opponent piece in this line?
+        their_blockers_coverable = True  # can the opponent cover every one of my pieces here?
+
         for r, c in line:
             if owners[r, c] == player:
                 my_count += 1
@@ -119,17 +133,24 @@ def evaluate(board, reserves, player, opponent, turn = None):
                     my_sum += 0.5
                 else:
                     my_sum += 1.0
+                    their_blockers_coverable = False
             elif owners[r, c] == opponent:
                 their_count += 1
                 if can_be_covered(sizes[r, c], my_max):
                     their_sum += 0.5
                 else:
                     their_sum += 1.0
+                    my_blockers_coverable = False
 
         if their_count == 0 and my_count > 0: # opponent has no piece in this line
             score += line_value[my_count] * (my_sum / my_count)
         elif my_count == 0 and their_count > 0:
             score -= line_value[their_count] * (their_sum / their_count)
+        elif my_count > 0 and their_count > 0:
+            if my_blockers_coverable: # if the opponent's pieces could be covered by mine, I could use this line
+                score += SCORE_BLOCK_WEIGHT * line_value[my_count] * (my_sum / my_count)
+            if their_blockers_coverable:
+                score -= SCORE_BLOCK_WEIGHT * line_value[their_count] * (their_sum / their_count) 
         # elif their_count == 3 and my_count == 1:
         #     r, c = my_squares[1]
         #     if (piece_below_top(board, r, c, sizes[r,c]) != EMPTY):
@@ -157,6 +178,7 @@ def evaluate(board, reserves, player, opponent, turn = None):
 
     # Larger visible pieces can cover more opposing pieces.  Prefer keeping
     # large pieces in reserve slightly, so they remain available as replies.
+    # bonus for number of pieces visible on the board, penalty for 
     for r in range(BOARD_SIZE):
         for c in range(BOARD_SIZE):
             owner = owners[r, c]
@@ -181,15 +203,16 @@ def max_value(board, reserves, player, opponent, alpha, beta, depth, deadline):
     if time.perf_counter() > deadline:
         raise TimeUp()
 
-    winner = check_winner(board, opponent)
+    owners, sizes = top_view(board)
+    winner = winner_from_owners(owners, opponent) 
     if winner == opponent:
         return -WIN_SCORE
     if winner == player:
         return WIN_SCORE
     if depth == 0:
-        return evaluate(board, reserves, player, opponent, turn = player)
+        return evaluate(board, reserves, player, opponent, turn = player, owners = owners, sizes = sizes)
 
-    for move in get_valid_moves(board, reserves, player):
+    for move in order_moves(board, get_valid_moves(board, reserves, player), player):
         next_board, next_reserves = after(board, reserves, player, move)
         alpha = max(alpha, min_value(next_board, next_reserves, player, opponent, alpha, beta, depth - 1, deadline))
         if alpha >= beta:
@@ -200,15 +223,16 @@ def min_value(board, reserves, player, opponent, alpha, beta, depth, deadline):
     if time.perf_counter() > deadline:
             raise TimeUp()
     
-    winner = check_winner(board, player)
+    owners, sizes = top_view(board)
+    winner = winner_from_owners(owners, player) # player just moved so we pass as arg
     if winner == player:
         return WIN_SCORE
     if winner == opponent:
         return -WIN_SCORE
     if depth == 0:
-        return evaluate(board, reserves, player, opponent, turn = opponent)
+        return evaluate(board, reserves, player, opponent, turn = opponent, owners = owners, sizes = sizes)
 
-    for move in get_valid_moves(board, reserves, opponent):
+    for move in order_moves(board, get_valid_moves(board, reserves, opponent), opponent):
         next_board, next_reserves = after(board, reserves, opponent, move)
         beta = min(beta, max_value(next_board, next_reserves, player, opponent, alpha, beta, depth - 1, deadline))
         if alpha >= beta:
@@ -238,15 +262,30 @@ def iterative_deepening(board, reserves, player, opponent):
     deadline = time.perf_counter() + TIME_LIMIT
     best_move = None
     depth = 1
+    completed_depth = 0
     try:
         while True:
             best_move, value = alpha_beta_decision(board, reserves, player, opponent, depth, deadline, best_move)
+            completed_depth = depth
             if value >= WIN_SCORE or value <= -WIN_SCORE:
                 break
             depth += 1
     except TimeUp:
         pass
     return best_move
+
+# prioritize better move when going through the tree
+def order_moves(board, moves, who):
+    owners, sizes = top_view(board)
+    def priority(m):
+        r, c = m.dest
+        p = m.size # prioritiz bigger pieces first
+        if owners[r, c] == 3 - who: # covering an opponent piece (attacks / blocks)
+            p += 10
+        if m.src is None: # placements before board moves
+            p += 1  # (board moves can uncover things)
+        return p
+    return sorted(moves, key=priority, reverse=True)
 
 #---------------------------------------------------------------------------
 # AGENT INITIALIZATION
